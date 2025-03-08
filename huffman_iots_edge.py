@@ -511,23 +511,18 @@ def get_patterns(segment: List[float], max_pattern_length: int = 4) -> Dict[Tupl
 
 def calculate_frequencies(data):
     """
-    Calculate frequencies of characters in the input data.
-    Returns a dictionary mapping characters to their frequencies.
+    Calculate frequencies of items in the data.
     """
     frequencies = {}
     for item in data:
-        if item in frequencies:
-            frequencies[item] += 1
-        else:
-            frequencies[item] = 1
+        frequencies[item] = frequencies.get(item, 0) + 1
     return frequencies
 
 def build_huffman_tree(frequencies):
     """
-    Build a Huffman tree from character frequencies.
-    Returns the root node of the Huffman tree.
+    Build a Huffman tree from frequency data.
     """
-    heap = [[freq, [char, ""]] for char, freq in frequencies.items()]
+    heap = [[freq, [sym, ""]] for sym, freq in frequencies.items()]
     heapq.heapify(heap)
     while len(heap) > 1:
         lo = heapq.heappop(heap)
@@ -537,14 +532,35 @@ def build_huffman_tree(frequencies):
         for pair in hi[1:]:
             pair[1] = '1' + pair[1]
         heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
-    return heap[0][1:]
+    return heap[0]
 
 def build_codebook(tree):
     """
     Build a codebook from a Huffman tree.
-    Returns a dictionary mapping characters to their binary codes.
     """
-    return {char: code for char, code in tree}
+    codebook = {}
+    for pair in tree[1:]:
+        codebook[pair[0]] = pair[1]
+    return codebook
+
+def compress_with_codebook(data, codebook):
+    """
+    Compress data using the provided Huffman codebook.
+    Returns the compressed binary string.
+    """
+    try:
+        compressed = []
+        for item in data:
+            if item in codebook:
+                compressed.append(codebook[item])
+            else:
+                logging.warning(f"Item {item} not found in codebook")
+                # Use the code for the most frequent item as fallback
+                most_frequent = min(codebook.values(), key=len)
+                compressed.append(most_frequent)
+        return ''.join(compressed)
+    except Exception as e:
+        raise CompressionError(f"Failed to compress with codebook: {str(e)}")
 
 #------------------------------------------------------------------------------
 # Neural-Inspired Optimization
@@ -630,241 +646,166 @@ def neural_prune_pool(trees: List[List[List[Any]]], max_codes: int = 10) -> Dict
 # Data Encoding and Compression
 #------------------------------------------------------------------------------
 
-def encode_data(data, codebook=None):
+def encode_sequence(values):
     """
-    Encode IoT sensor data using optimized encoding.
-    If codebook is None, performs initial encoding of raw values.
-    If codebook is provided, uses it for Huffman encoding.
+    Encode a sequence of values using predictive encoding, RLE, and pattern matching.
     """
-    try:
-        # Replace NaN values with 0
-        data = [0 if pd.isna(val) else val for val in data]
-        
-        if codebook is None:
-            # Initial encoding with delta compression
-            encoded_values = []
-            prev_val = None
-            
-            for val in data:
-                # Convert to integer with 2 decimal precision
-                int_val = int(val * 100)
-                
-                # Delta encoding
-                if prev_val is not None:
-                    delta = int_val - prev_val
-                    # Use fewer bits for small deltas
-                    if -8 <= delta <= 7:
-                        encoded_val = format((delta & 0xF) | 0x10, '05b')  # 5-bit delta
-                    else:
-                        encoded_val = format(int_val & 0xFFF, '012b')  # 12-bit full value
-                else:
-                    encoded_val = format(int_val & 0xFFF, '012b')  # 12-bit full value
-                
-                encoded_values.append(encoded_val)
-                prev_val = int_val
-            
-            return encoded_values
+    # Since data is already normalized, we can use smaller bit widths
+    # Convert to fixed-point representation with 8 bits
+    scaled_values = [int(v * 32) & 0xFF for v in values]
+    
+    # First pass: Run-length encoding for repeated values
+    rle_encoded = []
+    run_count = 1
+    for i in range(1, len(scaled_values)):
+        if scaled_values[i] == scaled_values[i-1]:
+            run_count += 1
+            if run_count == 15 or i == len(scaled_values) - 1:
+                # Encode run: '111' prefix + 4 bits count + 8 bits value
+                rle_encoded.append('111' + format(run_count, '04b') + format(scaled_values[i], '08b'))
+                run_count = 1
         else:
-            # Huffman encoding using provided codebook
-            encoded = []
-            for val in data:
-                if val in codebook:
-                    encoded.append(codebook[val])
-                else:
-                    logging.warning(f"Value {val} not found in codebook")
-                    # Use the code for the most frequent item as fallback
-                    most_frequent = min(codebook.values(), key=len)
-                    encoded.append(most_frequent)
-            return ''.join(encoded)
-            
-    except Exception as e:
-        raise CompressionError(f"Failed to encode data: {str(e)}")
-
-def decode_data(encoded: str, codebook: Dict[str, float]) -> List[float]:
-    """
-    Decode compressed IoT sensor data.
-    """
-    try:
-        # Reverse the codebook for decoding
-        reverse_codebook = {code: val for val, code in codebook.items()}
-        
-        # Huffman decode
-        decoded_values = []
-        buffer = ''
-        for bit in encoded:
-            buffer += bit
-            for code in reverse_codebook:
-                if buffer.startswith(code):
-                    decoded_values.append(reverse_codebook[code])
-                    buffer = buffer[len(code):]
-                    break
-        
-        def decode_sequence(encoded):
-            if not encoded:
-                return []
-            
-            # Read pattern codebook from header
-            header = encoded[0]
-            num_patterns = int(header[:4], 2)
-            pos = 4
-            
-            # Read patterns
-            patterns = {}
-            for _ in range(num_patterns):
-                pattern_len = int(header[pos:pos+4], 2)
-                pos += 4
-                pattern = []
-                for _ in range(pattern_len):
-                    val_len = 0
-                    if header[pos:pos+2] == '00':
-                        val_len = 5
-                    elif header[pos:pos+2] == '01':
-                        val_len = 7
-                    elif header[pos:pos+2] == '10':
-                        val_len = 9
-                    else:
-                        val_len = 13
-                    pattern.append(header[pos:pos+val_len])
-                    pos += val_len
-                code = header[pos:pos+4]
-                pos += 4
-                patterns[code] = tuple(pattern)
-            
-            # Decode values
-            values = []
-            prev = None
-            
-            for code in encoded[1:]:
-                if code.startswith('1'):
-                    # Pattern
-                    pattern_code = code[1:]
-                    if pattern_code in patterns:
-                        for val_code in patterns[pattern_code]:
-                            if val_code.startswith('00'):
-                                diff = int(val_code[2:], 2)
-                                if diff > 3:
-                                    diff -= 8
-                            elif val_code.startswith('01'):
-                                diff = int(val_code[2:], 2)
-                                if diff > 15:
-                                    diff -= 32
-                            elif val_code.startswith('10'):
-                                diff = int(val_code[2:], 2)
-                                if diff > 63:
-                                    diff -= 128
-                            else:
-                                diff = int(val_code[2:], 2)
-                                if diff > 1023:
-                                    diff -= 2048
-                            
-                            if prev is None:
-                                val = diff / 100.0
-                            else:
-                                val = prev + (diff / 100.0)
-                            values.append(val)
-                            prev = val
-                else:
-                    # Raw value
-                    val_code = code[1:]
-                    if val_code.startswith('00'):
-                        diff = int(val_code[2:], 2)
-                        if diff > 3:
-                            diff -= 8
-                    elif val_code.startswith('01'):
-                        diff = int(val_code[2:], 2)
-                        if diff > 15:
-                            diff -= 32
-                    elif val_code.startswith('10'):
-                        diff = int(val_code[2:], 2)
-                        if diff > 63:
-                            diff -= 128
-                    else:
-                        val = int(val_code[2:], 2) / 100.0
-                        values.append(val)
-                        prev = val
-                        continue
-                    
-                    if prev is None:
-                        val = diff / 100.0
-                    else:
-                        val = prev + (diff / 100.0)
-                    values.append(val)
-                    prev = val
-            
-            return values
-        
-        # Split decoded values into three sequences
-        n = len(decoded_values) // 3
-        temp_encoded = decoded_values[:n]
-        hum_encoded = decoded_values[n:2*n]
-        volt_encoded = decoded_values[2*n:]
-        
-        # Decode each sequence
-        temperature = decode_sequence(temp_encoded)
-        humidity = decode_sequence(hum_encoded)
-        voltage = decode_sequence(volt_encoded)
-        
-        # Interleave the sequences back together
-        final_values = []
-        for t, h, v in zip(temperature, humidity, voltage):
-            final_values.extend([t, h, v])
-        
-        return final_values
-        
-    except Exception as e:
-        raise CompressionError(f"Failed to decode data: {str(e)}")
-
-def compress_with_codebook(data, codebook):
-    """
-    Compress data using the provided Huffman codebook.
-    Returns the compressed binary string.
-    """
-    try:
-        compressed = []
-        for item in data:
-            if item in codebook:
-                compressed.append(codebook[item])
+            if run_count > 2:
+                # Encode previous run
+                rle_encoded.append('111' + format(run_count, '04b') + format(scaled_values[i-1], '08b'))
             else:
-                logging.warning(f"Item {item} not found in codebook")
-                # Use the code for the most frequent item as fallback
-                most_frequent = min(codebook.values(), key=len)
-                compressed.append(most_frequent)
-        return ''.join(compressed)
-    except Exception as e:
-        raise CompressionError(f"Failed to compress with codebook: {str(e)}")
-
-def quantize_value(value, precision=2):
-    """
-    Quantize a float value to a specified precision.
-    Handles NaN values by returning 0.
-    """
-    if pd.isna(value):
-        return 0.0
-    scale = 10 ** precision
-    return round(value * scale) / scale
-
-def find_patterns(values, min_length=2, max_length=8):
-    """
-    Find repeating patterns in the data.
-    Returns a dictionary of patterns and their frequencies.
-    """
-    patterns = {}
-    n = len(values)
+                # Output uncompressed values from the run
+                for _ in range(run_count):
+                    rle_encoded.append(format(scaled_values[i-1], '08b'))
+            run_count = 1
     
-    for length in range(min_length, min(max_length + 1, n + 1)):
-        for i in range(n - length + 1):
-            pattern = tuple(values[i:i+length])
-            if pattern in patterns:
-                patterns[pattern] += 1
+    # Handle last run if any
+    if run_count > 2:
+        rle_encoded.append('111' + format(run_count, '04b') + format(scaled_values[-1], '08b'))
+    else:
+        for _ in range(run_count):
+            rle_encoded.append(format(scaled_values[-1], '08b'))
+    
+    # Second pass: Calculate predictions and differences
+    diffs = []
+    prev_values = []
+    
+    for i, val_code in enumerate(rle_encoded):
+        if val_code.startswith('111'):
+            # RLE encoded value - pass through
+            diffs.append(val_code)
+            val = int(val_code[-8:], 2)
+            prev_values.extend([val] * int(val_code[3:7], 2))
+            if len(prev_values) > 4:
+                prev_values = prev_values[-4:]
+        else:
+            val = int(val_code, 2)
+            if len(prev_values) < 2:
+                # For first two values, use simple delta encoding
+                if len(prev_values) == 0:
+                    diffs.append(format(val, '08b'))  # First value
+                else:
+                    diff = val - prev_values[-1]
+                    if -8 <= diff <= 7:
+                        diffs.append('00' + format(diff & 0xF, '04b'))
+                    else:
+                        diffs.append('11' + format(val & 0xFF, '08b'))
             else:
-                patterns[pattern] = 1
+                # Use linear prediction for subsequent values
+                prediction = prev_values[-1] + (prev_values[-1] - prev_values[-2])
+                diff = val - prediction
+                
+                # Encode difference based on magnitude
+                if -4 <= diff <= 3:
+                    # Very small difference: 4 bits
+                    diffs.append('00' + format(diff & 0x7, '03b'))
+                elif -8 <= diff <= 7:
+                    # Small difference: 5 bits
+                    diffs.append('01' + format(diff & 0xF, '04b'))
+                elif -16 <= diff <= 15:
+                    # Medium difference: 6 bits
+                    diffs.append('10' + format(diff & 0x1F, '05b'))
+                else:
+                    # Large difference or prediction failed: 8 bits
+                    diffs.append('11' + format(val & 0xFF, '08b'))
+            
+            prev_values.append(val)
+            if len(prev_values) > 4:
+                prev_values.pop(0)
     
-    # Filter patterns that appear more than once
-    return {k: v for k, v in patterns.items() if v > 1}
+    # Find patterns in differences with longer sequences
+    patterns = find_patterns(diffs, min_length=4, max_length=16)
+    
+    # Sort patterns by compression benefit
+    pattern_scores = {}
+    for pattern, freq in patterns.items():
+        # Calculate pattern score based on:
+        # 1. Frequency of occurrence
+        # 2. Length of pattern
+        # 3. Total bits saved
+        total_bits = sum(len(p) for p in pattern)
+        bits_saved = (total_bits * freq) - (freq * (3 + len(format(len(patterns), '06b'))))
+        pattern_scores[pattern] = bits_saved if bits_saved > 0 else -1
+    
+    sorted_patterns = sorted(
+        [(p, f) for p, f in patterns.items() if pattern_scores[p] > 0],
+        key=lambda x: pattern_scores[x[0]],
+        reverse=True
+    )[:48]  # Keep top 48 patterns
+    
+    # Create pattern codebook with variable-length codes
+    pattern_codes = {}
+    for i, (pattern, _) in enumerate(sorted_patterns):
+        # Use shorter codes for more frequent patterns
+        if i < 8:
+            code = format(i, '03b')  # 3 bits
+        elif i < 16:
+            code = '100' + format(i - 8, '03b')  # 6 bits
+        elif i < 32:
+            code = '101' + format(i - 16, '04b')  # 7 bits
+        else:
+            code = '11' + format(i - 32, '04b')  # 6 bits
+        pattern_codes[pattern] = code
+    
+    # Encode using patterns with look-ahead and backtracking
+    encoded = []
+    i = 0
+    while i < len(diffs):
+        best_match = None
+        best_savings = 0
+        best_length = 0
+        
+        # Look for the pattern that gives best compression
+        for pattern, code in pattern_codes.items():
+            pattern_len = len(pattern)
+            if i + pattern_len <= len(diffs):
+                # Check if pattern matches
+                if tuple(diffs[i:i+pattern_len]) == pattern:
+                    # Calculate savings (original bits - encoded bits)
+                    savings = sum(len(p) for p in pattern) - len(code)
+                    if savings > best_savings:
+                        best_match = (pattern, code)
+                        best_savings = savings
+                        best_length = pattern_len
+        
+        if best_match and best_savings > 0:
+            pattern, code = best_match
+            encoded.append('1' + code)  # Pattern marker
+            i += best_length
+        else:
+            # If no good pattern found, encode single value
+            encoded.append('0' + diffs[i])  # Raw value
+            i += 1
+    
+    # Add pattern codebook to the beginning
+    header = format(len(pattern_codes), '06b')  # Number of patterns (up to 48)
+    for pattern, code in pattern_codes.items():
+        # Add pattern length and code
+        header += format(len(pattern), '04b')
+        for val in pattern:
+            header += val
+        header += format(len(code), '03b') + code
+    
+    return [header] + encoded
 
 def compress_iot_data(data):
     """
-    Compress IoT sensor data using quantization, differential encoding, and pattern-based compression.
+    Compress IoT sensor data using optimized compression techniques.
     """
     try:
         if len(data) == 0:
@@ -889,78 +830,6 @@ def compress_iot_data(data):
         temperature = cleaned_data[0::3]
         humidity = cleaned_data[1::3]
         voltage = cleaned_data[2::3]
-        
-        def encode_sequence(values):
-            # Quantize values
-            quantized = [quantize_value(x) for x in values]
-            
-            # Calculate differences
-            diffs = []
-            prev = quantized[0]
-            diffs.append(format(int(prev * 100) & 0xFFF, '012b'))  # First value full precision
-            
-            for val in quantized[1:]:
-                diff = val - prev
-                diff_scaled = int(diff * 100)
-                
-                # Use variable-length encoding for differences
-                if -4 <= diff_scaled <= 3:
-                    # Very small difference: 4 bits
-                    diffs.append('00' + format(diff_scaled & 0x7, '03b'))
-                elif -16 <= diff_scaled <= 15:
-                    # Small difference: 6 bits
-                    diffs.append('01' + format(diff_scaled & 0x1F, '05b'))
-                elif -64 <= diff_scaled <= 63:
-                    # Medium difference: 8 bits
-                    diffs.append('10' + format(diff_scaled & 0x7F, '07b'))
-                else:
-                    # Large difference: 13 bits
-                    diffs.append('11' + format(diff_scaled & 0x7FF, '011b'))
-                
-                prev = val
-            
-            # Find patterns in differences
-            patterns = find_patterns(diffs)
-            
-            # Sort patterns by compression benefit
-            sorted_patterns = sorted(
-                patterns.items(),
-                key=lambda x: (x[1] * len(x[0][0])) - (x[1] * len(str(len(patterns)))),
-                reverse=True
-            )[:16]  # Keep only top 16 patterns
-            
-            # Create pattern codebook
-            pattern_codes = {}
-            for i, (pattern, _) in enumerate(sorted_patterns):
-                pattern_codes[pattern] = format(i, '04b')
-            
-            # Encode using patterns
-            encoded = []
-            i = 0
-            while i < len(diffs):
-                matched = False
-                for pattern, code in pattern_codes.items():
-                    if i + len(pattern) <= len(diffs):
-                        if tuple(diffs[i:i+len(pattern)]) == pattern:
-                            encoded.append('1' + code)  # Pattern marker
-                            i += len(pattern)
-                            matched = True
-                            break
-                
-                if not matched:
-                    encoded.append('0' + diffs[i])  # Raw value
-                    i += 1
-            
-            # Add pattern codebook to the beginning
-            header = format(len(pattern_codes), '04b')  # Number of patterns
-            for pattern, code in pattern_codes.items():
-                # Add pattern length and code
-                header += format(len(pattern), '04b')
-                for val in pattern:
-                    header += val
-                header += code
-            
-            return [header] + encoded
         
         # Encode each sequence
         encoded_temp = encode_sequence(temperature)
@@ -1061,9 +930,8 @@ class RealTimeCompressor:
             self.current_codebook = dict(tree)
             
             # Compress with enhanced encoding
-            compressed = encode_data(
+            compressed = encode_sequence(
                 delta_encoded,
-                self.current_codebook,
                 BATCH_SIZE
             )
             
@@ -1096,6 +964,192 @@ def optimize_patterns(self, data: List[float], window_size: int) -> Dict[Tuple[f
         median_score = np.median(list(patterns.values()))
         patterns = {k: v * 1.25 for k, v in patterns.items() 
                    if v > median_score * 0.8}  # Keep more patterns with boosted scores
+    
+    return patterns
+
+def decode_sequence(encoded):
+    """
+    Decode a sequence of values that was encoded using predictive encoding.
+    """
+    if not encoded:
+        return []
+        
+    # Read pattern codebook from header
+    header = encoded[0]
+    num_patterns = int(header[:6], 2)  # 6 bits for number of patterns
+    pos = 6
+    
+    # Read patterns
+    patterns = {}
+    for _ in range(num_patterns):
+        pattern_len = int(header[pos:pos+4], 2)
+        pos += 4
+        pattern = []
+        for _ in range(pattern_len):
+            pattern_val = header[pos:pos+10]  # Read max possible length
+            if pattern_val.startswith('00'):
+                if len(pattern_val) >= 5:
+                    pattern.append(pattern_val[:5])
+                    pos += 5
+            elif pattern_val.startswith('01'):
+                if len(pattern_val) >= 6:
+                    pattern.append(pattern_val[:6])
+                    pos += 6
+            elif pattern_val.startswith('10'):
+                if len(pattern_val) >= 7:
+                    pattern.append(pattern_val[:7])
+                    pos += 7
+            else:
+                if len(pattern_val) >= 10:
+                    pattern.append(pattern_val[:10])
+                    pos += 10
+        code_len = int(header[pos:pos+3], 2)
+        pos += 3
+        code = header[pos:pos+code_len]
+        pos += code_len
+        patterns[code] = tuple(pattern)
+    
+    # Decode values
+    values = []
+    prev_values = []
+    
+    for code in encoded[1:]:
+        if code.startswith('1'):
+            # Pattern
+            pattern_code = code[1:]
+            if pattern_code in patterns:
+                for val_code in patterns[pattern_code]:
+                    if val_code.startswith('00'):
+                        if len(prev_values) < 2:
+                            # Simple delta for first two values
+                            diff = int(val_code[2:], 2)
+                            if diff > 7:
+                                diff -= 16
+                            val = (prev_values[-1] if prev_values else 0) + diff
+                        else:
+                            # Very small difference (3 bits)
+                            diff = int(val_code[2:], 2)
+                            if diff > 3:
+                                diff -= 8
+                            prediction = prev_values[-1] + (prev_values[-1] - prev_values[-2])
+                            val = prediction + diff
+                    elif val_code.startswith('01'):
+                        # Small difference (4 bits)
+                        diff = int(val_code[2:], 2)
+                        if diff > 7:
+                            diff -= 16
+                        if len(prev_values) >= 2:
+                            prediction = prev_values[-1] + (prev_values[-1] - prev_values[-2])
+                            val = prediction + diff
+                        else:
+                            val = (prev_values[-1] if prev_values else 0) + diff
+                    elif val_code.startswith('10'):
+                        # Medium difference (5 bits)
+                        diff = int(val_code[2:], 2)
+                        if diff > 15:
+                            diff -= 32
+                        if len(prev_values) >= 2:
+                            prediction = prev_values[-1] + (prev_values[-1] - prev_values[-2])
+                            val = prediction + diff
+                        else:
+                            val = (prev_values[-1] if prev_values else 0) + diff
+                    else:
+                        # Raw value (8 bits)
+                        val = int(val_code[2:], 2)
+                    
+                    values.append(val / 32.0)  # Denormalize
+                    prev_values.append(val)
+                    if len(prev_values) > 4:
+                        prev_values.pop(0)
+        else:
+            # Raw value
+            val_code = code[1:]
+            val = int(val_code, 2)
+            values.append(val / 32.0)  # Denormalize
+            prev_values.append(val)
+            if len(prev_values) > 4:
+                prev_values.pop(0)
+    
+    return values
+
+def decode_data(encoded_data, codebook):
+    """
+    Decode compressed IoT sensor data.
+    """
+    try:
+        # Reverse the codebook for decoding
+        reverse_codebook = {code: val for val, code in codebook.items()}
+        
+        # Huffman decode
+        decoded_values = []
+        buffer = ''
+        for bit in encoded_data:
+            buffer += bit
+            for code in reverse_codebook:
+                if buffer.startswith(code):
+                    decoded_values.append(reverse_codebook[code])
+                    buffer = buffer[len(code):]
+                    break
+        
+        # Split decoded values into three sequences
+        n = len(decoded_values) // 3
+        temp_encoded = decoded_values[:n]
+        hum_encoded = decoded_values[n:2*n]
+        volt_encoded = decoded_values[2*n:]
+        
+        # Decode each sequence
+        temperature = decode_sequence(temp_encoded)
+        humidity = decode_sequence(hum_encoded)
+        voltage = decode_sequence(volt_encoded)
+        
+        # Interleave the sequences back together
+        final_values = []
+        for t, h, v in zip(temperature, humidity, voltage):
+            final_values.extend([t, h, v])
+        
+        return final_values
+        
+    except Exception as e:
+        raise CompressionError(f"Failed to decode data: {str(e)}")
+
+def find_patterns(values, min_length=2, max_length=8):
+    """
+    Find repeating patterns in the data.
+    Returns a dictionary of patterns and their frequencies.
+    """
+    patterns = {}
+    n = len(values)
+    
+    # Use sliding window to find patterns
+    for length in range(min_length, min(max_length + 1, n + 1)):
+        # Use dictionary to track pattern occurrences
+        pattern_positions = {}
+        
+        # Slide window over the sequence
+        for i in range(n - length + 1):
+            pattern = tuple(values[i:i+length])
+            
+            # Track positions where pattern occurs
+            if pattern in pattern_positions:
+                pattern_positions[pattern].append(i)
+            else:
+                pattern_positions[pattern] = [i]
+        
+        # Convert to frequency dictionary for patterns that appear more than once
+        # and have non-overlapping occurrences
+        for pattern, positions in pattern_positions.items():
+            if len(positions) > 1:
+                # Check for non-overlapping occurrences
+                non_overlapping = 1
+                last_end = positions[0] + length
+                
+                for pos in positions[1:]:
+                    if pos >= last_end:
+                        non_overlapping += 1
+                        last_end = pos + length
+                
+                if non_overlapping > 1:
+                    patterns[pattern] = non_overlapping
     
     return patterns
 

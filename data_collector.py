@@ -45,19 +45,42 @@ class DataCollector:
         try:
             total_rows = len(self.csv_data)
             
+            # Pre-process data for better compression
+            # Normalize data to reduce value ranges
+            temp_mean = self.csv_data['temperature'].mean()
+            temp_std = self.csv_data['temperature'].std()
+            hum_mean = self.csv_data['humidity'].mean()
+            hum_std = self.csv_data['humidity'].std()
+            volt_mean = self.csv_data['voltage'].mean()
+            volt_std = self.csv_data['voltage'].std()
+            
+            normalized_data = pd.DataFrame({
+                'temperature': (self.csv_data['temperature'] - temp_mean) / temp_std,
+                'humidity': (self.csv_data['humidity'] - hum_mean) / hum_std,
+                'voltage': (self.csv_data['voltage'] - volt_mean) / volt_std
+            })
+            
+            # Store normalization parameters for later use
+            self.normalization_params = {
+                'temp_mean': temp_mean, 'temp_std': temp_std,
+                'hum_mean': hum_mean, 'hum_std': hum_std,
+                'volt_mean': volt_mean, 'volt_std': volt_std
+            }
+            
             # Process data in memory-efficient chunks
             for i in range(0, total_rows, chunk_size):
-                chunk = self.csv_data.iloc[i:i+chunk_size]
+                chunk = normalized_data.iloc[i:i+chunk_size]
                 
-                # Convert numeric values to list
+                # Convert numeric values to list with efficient vectorization
                 data = []
-                for _, row in chunk.iterrows():
-                    # Add each sensor reading separately
-                    data.extend([
-                        row['temperature'],
-                        row['humidity'],
-                        row['voltage']
-                    ])
+                # Use numpy's efficient array operations
+                temp_values = chunk['temperature'].to_numpy()
+                hum_values = chunk['humidity'].to_numpy()
+                volt_values = chunk['voltage'].to_numpy()
+                
+                # Interleave values efficiently
+                for t, h, v in np.column_stack((temp_values, hum_values, volt_values)):
+                    data.extend([t, h, v])
                 
                 yield data
                 
@@ -68,6 +91,24 @@ class DataCollector:
         except Exception as e:
             logging.error(f"Error reading CSV data: {str(e)}")
             raise
+    
+    def denormalize_data(self, data: List[float]) -> List[float]:
+        """Denormalize data back to original scale"""
+        if not hasattr(self, 'normalization_params'):
+            return data
+        
+        denormalized = []
+        for i in range(0, len(data), 3):
+            if i + 2 < len(data):
+                # Temperature
+                temp = data[i] * self.normalization_params['temp_std'] + self.normalization_params['temp_mean']
+                # Humidity
+                hum = data[i+1] * self.normalization_params['hum_std'] + self.normalization_params['hum_mean']
+                # Voltage
+                volt = data[i+2] * self.normalization_params['volt_std'] + self.normalization_params['volt_mean']
+                denormalized.extend([temp, hum, volt])
+        
+        return denormalized
     
     def generate_test_data(self, size: int = 1000) -> List[float]:
         """Generate realistic IoT sensor data patterns for testing"""

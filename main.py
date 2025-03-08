@@ -198,7 +198,7 @@ class CompressionApp:
                 json.dump(self.stats, f, indent=2)
     
     def run_tests(self):
-        """Run comprehensive compression tests"""
+        """Run comprehensive compression tests with optimized handling of large datasets"""
         logging.info("Running compression tests")
         
         test_sizes = [100, 1000, 10000]
@@ -209,17 +209,33 @@ class CompressionApp:
             test_data = self.collector.generate_test_data(size)
             
             try:
-                # Warmup run
-                _ = compress_iot_data(test_data[:100])
-                
-                # Actual test
+                # Process data in chunks for large test cases
+                chunk_size = min(1000, size)  # Process at most 1000 samples at a time
+                compressed_chunks = []
+                codebooks = []
+                total_original_size = 0
+                total_compressed_size = 0
                 start_time = time.time()
-                compressed, codebook = compress_iot_data(test_data)
+                
+                # Process data in chunks
+                for i in range(0, len(test_data), chunk_size):
+                    chunk = test_data[i:i+chunk_size]
+                    compressed, codebook = compress_iot_data(chunk)
+                    compressed_chunks.append(compressed)
+                    codebooks.append(codebook)
+                    total_original_size += len(chunk) * 32
+                    total_compressed_size += len(compressed)
+                    
+                    # Print progress for large datasets
+                    if size > 1000:
+                        progress = (i + len(chunk)) / len(test_data) * 100
+                        print(f"\rProgress: {progress:.1f}%", end="")
+                
                 compression_time = time.time() - start_time
                 
-                # Calculate metrics
-                compression_ratio = (len(test_data) * 32) / len(compressed)
-                memory_used = sys.getsizeof(compressed) / 1024
+                # Calculate overall metrics
+                compression_ratio = total_original_size / total_compressed_size
+                memory_used = sum(sys.getsizeof(c) for c in compressed_chunks) / 1024
                 
                 results.append({
                     'size': size,
@@ -228,12 +244,18 @@ class CompressionApp:
                     'memory': memory_used
                 })
                 
-                print(f"Compression Ratio: {compression_ratio:.2f}x")
+                print(f"\nCompression Ratio: {compression_ratio:.2f}x")
                 print(f"Memory Used: {memory_used:.1f}KB")
                 print(f"Processing Time: {compression_time:.3f}s")
                 
+                # Clean up to free memory
+                del compressed_chunks
+                del codebooks
+                
             except Exception as e:
                 logging.error(f"Test failed for size {size}: {str(e)}")
+                print(f"\nError testing size {size}: {str(e)}")
+                continue
         
         # Save test results
         test_path = Path(config.OUTPUT_DIR) / "test_results.json"
