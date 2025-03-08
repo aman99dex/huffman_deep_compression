@@ -1,0 +1,6 @@
+numpy>=1.20.0
+pandas>=1.2.0
+pyserial>=3.5
+scikit-learn>=0.24.0
+pathlib>=1.0.1
+typing>=3.7.4 
